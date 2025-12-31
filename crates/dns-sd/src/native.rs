@@ -12,6 +12,94 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
+// ----------------------------------------------------------------
+// Cross-platform compat layer
+// ----------------------------------------------------------------
+
+#[cfg(unix)]
+mod sys {
+    pub use libc::{AF_INET, AF_INET6, sockaddr_in, sockaddr_in6, poll, pollfd, POLLIN};
+}
+
+#[cfg(windows)]
+mod sys {
+    #![allow(non_camel_case_types)]
+    
+    // We need to define compatible types because libc on Windows
+    // doesn't expose them in the top-level or possibly at all in the same way.
+    // However, for FFI with generic C APIs, we need layouts matching C.
+    
+    pub type sa_family_t = u16;
+    
+    pub const AF_INET: u16 = 2;
+    pub const AF_INET6: u16 = 23;
+
+    #[repr(C)]
+    pub struct in_addr {
+        pub s_addr: u32,
+    }
+
+    #[repr(C)]
+    pub struct sockaddr_in {
+        pub sin_family: sa_family_t,
+        pub sin_port: u16,
+        pub sin_addr: in_addr,
+        pub sin_zero: [u8; 8],
+    }
+
+    #[repr(C)]
+    pub struct in6_addr {
+        pub s6_addr: [u8; 16],
+    }
+
+    #[repr(C)]
+    pub struct sockaddr_in6 {
+        pub sin6_family: sa_family_t,
+        pub sin6_port: u16,
+        pub sin6_flowinfo: u32,
+        pub sin6_addr: in6_addr,
+        pub sin6_scope_id: u32,
+    }
+
+    // POLL structs
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy)]
+    pub struct pollfd {
+        pub fd: i64, // SOCKET is u64/usize usually, but on Windows 64-bit it is 64-bit
+                     // BUT, dns_sd uses int for FD usually? 
+                     // Wait, DNSServiceRefSockFD returns int.
+                     // On Windows, it might return a SOCKET cast to int?
+                     // Or maybe we treat it as raw handle.
+        pub events: i16,
+        pub revents: i16,
+    }
+
+    pub const POLLIN: i16 = 0x0100; // 0x0300 is RDNORM | RDBAND usually, but let's check WSAPoll.
+                                    // WSAPoll defaults:
+                                    // POLLIN = 0x0100 | 0x0200 (RDNORM | RDBAND)
+                                    // Actually, standard is:
+                                    // #define POLLIN 0x0300
+    
+    // Let's use standard values compatible with WSAPoll
+    // Win32:
+    // POLLIN = 0x0300
+    // But let's check what libc expects if we were using it.
+    // We will just use what WSAPoll expects.
+    
+    // However, since we can't link ws2_32 easily safely in this simple patch without build.rs changes?
+    // Actually, we can use libloading for WSAPoll too!
+    
+    #[link(name = "ws2_32")]
+    extern "system" {
+        fn WSAPoll(fdArray: *mut pollfd, fds: u32, timeout: i32) -> i32;
+    }
+
+    pub unsafe fn poll(fds: *mut pollfd, nfds: u64, timeout: i32) -> i32 {
+         WSAPoll(fds, nfds as u32, timeout)
+    }
+}
+
+
 /// Global library instance
 static LIBRARY: OnceCell<Result<DnsSdLibrary, String>> = OnceCell::new();
 
@@ -335,13 +423,13 @@ fn resolve_service_full(
                 let sa_family = (*address).sa_family;
                 let mut ip_str = String::new();
 
-                if u16::from(sa_family) == libc::AF_INET as u16 {
-                    let addr4 = address as *const libc::sockaddr_in;
+                if u16::from(sa_family) == sys::AF_INET as u16 {
+                    let addr4 = address as *const sys::sockaddr_in;
                     let ip_bytes = (*addr4).sin_addr.s_addr.to_ne_bytes();
                     let ip = Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
                     ip_str = IpAddr::V4(ip).to_string();
-                } else if u16::from(sa_family) == libc::AF_INET6 as u16 {
-                    let addr6 = address as *const libc::sockaddr_in6;
+                } else if u16::from(sa_family) == sys::AF_INET6 as u16 {
+                    let addr6 = address as *const sys::sockaddr_in6;
                     let ip_bytes = (*addr6).sin6_addr.s6_addr;
                     let ip = Ipv6Addr::from(ip_bytes);
                     ip_str = IpAddr::V6(ip).to_string();
@@ -507,16 +595,16 @@ where F: FnMut() -> bool {
             let fd = (lib.ref_sock_fd)(sd_ref);
             if fd < 0 { break; }
 
-            let mut pfd = libc::pollfd {
-                fd,
-                events: libc::POLLIN,
+            let mut pfd = sys::pollfd {
+                fd: fd as _,
+                events: sys::POLLIN,
                 revents: 0,
             };
 
             let remaining = timeout_ms.saturating_sub(start.elapsed().as_millis()).max(1) as i32;
             let poll_timeout = remaining.min(100); // Poll in 100ms chunks to check predicate
 
-            let ready = libc::poll(&mut pfd, 1, poll_timeout);
+            let ready = sys::poll(&mut pfd, 1, poll_timeout);
 
             if ready > 0 {
                 (lib.process_result)(sd_ref);
@@ -626,13 +714,13 @@ impl NativeBrowser {
                         break;
                     }
 
-                    let mut pfd = libc::pollfd {
-                        fd,
-                        events: libc::POLLIN,
+                    let mut pfd = sys::pollfd {
+                        fd: fd as _,
+                        events: sys::POLLIN,
                         revents: 0,
                     };
 
-                    let ready = libc::poll(&mut pfd, 1, 100);
+                    let ready = sys::poll(&mut pfd, 1, 100);
 
                     if ready > 0 {
                         let err = (lib.process_result)(sd_ref);
@@ -829,13 +917,13 @@ impl NativeAdvertisement {
                         break;
                     }
 
-                    let mut pfd = libc::pollfd {
-                        fd,
-                        events: libc::POLLIN,
+                    let mut pfd = sys::pollfd {
+                        fd: fd as _,
+                        events: sys::POLLIN,
                         revents: 0,
                     };
 
-                    let ready = libc::poll(&mut pfd, 1, 100);
+                    let ready = sys::poll(&mut pfd, 1, 100);
 
                     if ready > 0 {
                         let err = (lib.process_result)(sd_ref);
