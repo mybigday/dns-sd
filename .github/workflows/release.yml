@@ -1,5 +1,8 @@
 name: Release
 
+env:
+  NPM_REGISTRY: 'https://registry.npmjs.org'
+
 run-name: |
   ${{ (inputs.dryrun && 'Dry run')
    || format('Release: {0}', (inputs.version == 'custom' && inputs.custom) || inputs.version) }}
@@ -29,6 +32,10 @@ on:
         description: 'Custom version'
         required: false
         default: ''
+
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
   setup:
@@ -127,8 +134,6 @@ jobs:
           out-file-path: ./dist
       - name: Publish
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for p in ./dist/*.tgz ; do
             npm publish --access public $p
