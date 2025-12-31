@@ -1,7 +1,7 @@
 {
   "name": "@fugood/dns-sd-darwin-arm64",
   "description": "Prebuilt binary package for `dns-sd` on `darwin-arm64`.",
-  "version": "0.1.0-alpha.0",
+  "version": "0.1.0-alpha.1",
   "os": [
     "darwin"
   ],
