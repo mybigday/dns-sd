@@ -90,12 +90,12 @@ mod sys {
     // Actually, we can use libloading for WSAPoll too!
     
     #[link(name = "ws2_32")]
-    extern "system" {
+    unsafe extern "system" {
         fn WSAPoll(fdArray: *mut pollfd, fds: u32, timeout: i32) -> i32;
     }
 
     pub unsafe fn poll(fds: *mut pollfd, nfds: u64, timeout: i32) -> i32 {
-         WSAPoll(fds, nfds as u32, timeout)
+         unsafe { WSAPoll(fds, nfds as u32, timeout) }
     }
 }
 
