@@ -1,0 +1,41 @@
+{
+  "name": "@fugood/dns-sd-darwin-x64",
+  "description": "Prebuilt binary package for `dns-sd` on `darwin-x64`.",
+  "version": "0.1.0",
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "index.node",
+  "files": [
+    "index.node"
+  ],
+  "neon": {
+    "type": "binary",
+    "rust": "x86_64-apple-darwin",
+    "node": "darwin-x64",
+    "os": "darwin",
+    "arch": "x64",
+    "abi": null
+  },
+  "author": "Hans <hans@bricks.tools>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mybigday/dns-sd.git"
+  },
+  "keywords": [
+    "DNS-SD",
+    "bonjour",
+    "mDNS",
+    "zeroconf",
+    "avahi",
+    "discovery"
+  ],
+  "bugs": {
+    "url": "https://github.com/mybigday/dns-sd/issues"
+  },
+  "homepage": "https://github.com/mybigday/dns-sd#readme",
+  "license": "MIT"
+}

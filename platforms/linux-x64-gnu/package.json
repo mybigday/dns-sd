@@ -1,0 +1,41 @@
+{
+  "name": "@fugood/dns-sd-linux-x64-gnu",
+  "description": "Prebuilt binary package for `dns-sd` on `linux-x64-gnu`.",
+  "version": "0.1.0",
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "main": "index.node",
+  "files": [
+    "index.node"
+  ],
+  "neon": {
+    "type": "binary",
+    "rust": "x86_64-unknown-linux-gnu",
+    "node": "linux-x64-gnu",
+    "os": "linux",
+    "arch": "x64",
+    "abi": "gnu"
+  },
+  "author": "Hans <hans@bricks.tools>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mybigday/dns-sd.git"
+  },
+  "keywords": [
+    "DNS-SD",
+    "bonjour",
+    "mDNS",
+    "zeroconf",
+    "avahi",
+    "discovery"
+  ],
+  "bugs": {
+    "url": "https://github.com/mybigday/dns-sd/issues"
+  },
+  "homepage": "https://github.com/mybigday/dns-sd#readme",
+  "license": "MIT"
+}

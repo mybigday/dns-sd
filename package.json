@@ -1,0 +1,85 @@
+{
+  "name": "dns-sd",
+  "version": "0.1.0",
+  "description": "Cross platform DNS-SD",
+  "main": "./lib/index.cjs",
+  "scripts": {
+    "test": "tsc &&cargo test",
+    "cargo-build": "tsc &&cargo build --message-format=json-render-diagnostics > cargo.log",
+    "cross-build": "tsc &&cross build --message-format=json-render-diagnostics > cross.log",
+    "postcargo-build": "neon dist < cargo.log",
+    "postcross-build": "neon dist -m /target < cross.log",
+    "debug": "npm run cargo-build --",
+    "build": "npm run cargo-build -- --release",
+    "cross": "npm run cross-build -- --release",
+    "prepack": "tsc && neon update",
+    "version": "neon bump --binaries platforms && git add .",
+    "release": "gh workflow run release.yml -f dryrun=false -f version=patch",
+    "dryrun": "gh workflow run publish.yml -f dryrun=true"
+  },
+  "author": "Hans <hans.chen@bricks.tools>",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./lib/index.d.mts",
+        "default": "./lib/index.mjs"
+      },
+      "require": {
+        "types": "./lib/index.d.cts",
+        "default": "./lib/index.cjs"
+      }
+    }
+  },
+  "types": "./lib/index.d.cts",
+  "files": [
+    "lib/**/*.?({c,m}){t,j}s"
+  ],
+  "neon": {
+    "type": "library",
+    "org": "@fugood",
+    "prefix": "dns-sd-",
+    "platforms": [
+      "win32-x64-msvc",
+      "win32-arm64-msvc",
+      "darwin-x64",
+      "darwin-arm64",
+      "linux-x64-gnu",
+      "linux-arm64-gnu"
+    ],
+    "load": "./src/load.cts"
+  },
+  "devDependencies": {
+    "@neon-rs/cli": "^0.1.82",
+    "@tsconfig/node20": "^20.1.4",
+    "@types/node": "^20.11.16",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "@neon-rs/load": "^0.1.82"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mybigday/dns-sd.git"
+  },
+  "keywords": [
+    "DNS-SD",
+    "bonjour",
+    "mDNS",
+    "zeroconf",
+    "avahi",
+    "discovery"
+  ],
+  "bugs": {
+    "url": "https://github.com/mybigday/dns-sd/issues"
+  },
+  "homepage": "https://github.com/mybigday/dns-sd#readme",
+  "optionalDependencies": {
+    "@fugood/dns-sd-win32-x64-msvc": "0.1.0",
+    "@fugood/dns-sd-darwin-x64": "0.1.0",
+    "@fugood/dns-sd-darwin-arm64": "0.1.0",
+    "@fugood/dns-sd-linux-x64-gnu": "0.1.0",
+    "@fugood/dns-sd-linux-arm64-gnu": "0.1.0",
+    "@fugood/dns-sd-win32-arm64-msvc": "0.1.0"
+  }
+}

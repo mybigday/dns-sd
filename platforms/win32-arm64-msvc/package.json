@@ -1,0 +1,41 @@
+{
+    "name": "@fugood/dns-sd-win32-arm64-msvc",
+    "description": "Prebuilt binary package for `dns-sd` on `win32-arm64-msvc`.",
+    "version": "0.1.0",
+    "os": [
+        "win32"
+    ],
+    "cpu": [
+        "arm64"
+    ],
+    "main": "index.node",
+    "files": [
+        "index.node"
+    ],
+    "neon": {
+        "type": "binary",
+        "rust": "aarch64-pc-windows-msvc",
+        "node": "win32-arm64-msvc",
+        "os": "win32",
+        "arch": "arm64",
+        "abi": "msvc"
+    },
+    "author": "Hans <hans@bricks.tools>",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/mybigday/dns-sd.git"
+    },
+    "keywords": [
+        "DNS-SD",
+        "bonjour",
+        "mDNS",
+        "zeroconf",
+        "avahi",
+        "discovery"
+    ],
+    "bugs": {
+        "url": "https://github.com/mybigday/dns-sd/issues"
+    },
+    "homepage": "https://github.com/mybigday/dns-sd#readme",
+    "license": "MIT"
+}
