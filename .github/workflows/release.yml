@@ -64,21 +64,7 @@ jobs:
         name: Validate Publish Event
         if: ${{ !inputs.dryrun }}
         shell: bash
-        env:
-          NPM_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [[ -z $(npm whoami) ]]; then
-            echo "::error::Secret NPM_TOKEN is not defined for this GitHub repo."
-            echo "::error::To publish to npm, this action requires:"
-            echo "::error:: • an npm access token;"
-            echo "::error:: • with Read-Write access to this project's npm packages;"
-            echo "::error:: • stored as a repo secret named NPM_TOKEN."
-            echo "::error::See https://docs.npmjs.com/about-access-tokens for info about creating npm tokens."
-            echo "::error:: 💡 The simplest method is to create a Classic npm token of type Automation."
-            echo "::error:: 💡 For greater security, consider using a Granual access token."
-            echo "::error::See https://docs.github.com/en/actions/security-guides/using-secrets-in-github-actions for info about how to store GitHub repo secrets."
-            exit 1
-          fi
           echo publish=true | tee -a $GITHUB_OUTPUT
       - name: Checkout Code
         uses: actions/checkout@v3
