@@ -335,12 +335,12 @@ fn resolve_service_full(
                 let sa_family = (*address).sa_family;
                 let mut ip_str = String::new();
 
-                if sa_family == libc::AF_INET as u16 {
+                if u16::from(sa_family) == libc::AF_INET as u16 {
                     let addr4 = address as *const libc::sockaddr_in;
                     let ip_bytes = (*addr4).sin_addr.s_addr.to_ne_bytes();
                     let ip = Ipv4Addr::new(ip_bytes[0], ip_bytes[1], ip_bytes[2], ip_bytes[3]);
                     ip_str = IpAddr::V4(ip).to_string();
-                } else if sa_family == libc::AF_INET6 as u16 {
+                } else if u16::from(sa_family) == libc::AF_INET6 as u16 {
                     let addr6 = address as *const libc::sockaddr_in6;
                     let ip_bytes = (*addr6).sin6_addr.s6_addr;
                     let ip = Ipv6Addr::from(ip_bytes);
