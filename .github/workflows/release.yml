@@ -65,9 +65,9 @@ jobs:
         if: ${{ !inputs.dryrun }}
         shell: bash
         env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          if [[ -z $NPM_TOKEN ]]; then
+          if [[ -z $(npm whoami) ]]; then
             echo "::error::Secret NPM_TOKEN is not defined for this GitHub repo."
             echo "::error::To publish to npm, this action requires:"
             echo "::error:: • an npm access token;"
