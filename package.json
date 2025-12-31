@@ -4,7 +4,7 @@
   "description": "Cross platform DNS-SD",
   "main": "./lib/index.cjs",
   "scripts": {
-    "test": "tsc &&cargo test",
+    "test": "tsc && cargo test",
     "cargo-build": "tsc &&cargo build --message-format=json-render-diagnostics > cargo.log",
     "cross-build": "tsc &&cross build --message-format=json-render-diagnostics > cross.log",
     "postcargo-build": "neon dist < cargo.log",
@@ -15,7 +15,8 @@
     "prepack": "tsc && neon update",
     "version": "neon bump --binaries platforms && git add .",
     "release": "gh workflow run release.yml -f dryrun=false -f version=patch",
-    "dryrun": "gh workflow run publish.yml -f dryrun=true"
+    "dryrun": "gh workflow run publish.yml -f dryrun=true",
+    "prepare": "husky"
   },
   "author": "Hans <hans.chen@bricks.tools>",
   "license": "MIT",
@@ -50,9 +51,12 @@
     "load": "./src/load.cts"
   },
   "devDependencies": {
+    "@commitlint/cli": "^20.2.0",
+    "@commitlint/config-conventional": "^20.2.0",
     "@neon-rs/cli": "^0.1.82",
     "@tsconfig/node20": "^20.1.4",
     "@types/node": "^20.11.16",
+    "husky": "^9.1.7",
     "typescript": "^5.3.3"
   },
   "dependencies": {
@@ -75,11 +79,11 @@
   },
   "homepage": "https://github.com/mybigday/dns-sd#readme",
   "optionalDependencies": {
-    "@fugood/dns-sd-win32-x64-msvc": "0.1.0",
-    "@fugood/dns-sd-darwin-x64": "0.1.0",
     "@fugood/dns-sd-darwin-arm64": "0.1.0",
-    "@fugood/dns-sd-linux-x64-gnu": "0.1.0",
+    "@fugood/dns-sd-darwin-x64": "0.1.0",
     "@fugood/dns-sd-linux-arm64-gnu": "0.1.0",
-    "@fugood/dns-sd-win32-arm64-msvc": "0.1.0"
+    "@fugood/dns-sd-linux-x64-gnu": "0.1.0",
+    "@fugood/dns-sd-win32-arm64-msvc": "0.1.0",
+    "@fugood/dns-sd-win32-x64-msvc": "0.1.0"
   }
 }
