@@ -1,5 +1,5 @@
 {
-  "name": "dns-sd",
+  "name": "@fugood/dns-sd",
   "version": "0.1.0-alpha.0",
   "description": "Cross platform DNS-SD",
   "main": "./lib/index.cjs",
