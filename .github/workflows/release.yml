@@ -134,6 +134,8 @@ jobs:
           out-file-path: ./dist
       - name: Publish
         shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for p in ./dist/*.tgz ; do
             npm publish --access public $p
