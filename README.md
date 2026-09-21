@@ -39,6 +39,21 @@ Prebuilt binaries are pulled in automatically as optional dependencies, one per 
 | macOS arm64 | [`@fugood/dns-sd-darwin-arm64`](https://www.npmjs.com/package/@fugood/dns-sd-darwin-arm64) |
 | Linux x64 (glibc) | [`@fugood/dns-sd-linux-x64-gnu`](https://www.npmjs.com/package/@fugood/dns-sd-linux-x64-gnu) |
 | Linux arm64 (glibc) | [`@fugood/dns-sd-linux-arm64-gnu`](https://www.npmjs.com/package/@fugood/dns-sd-linux-arm64-gnu) |
+| Linux x64 (musl) | [`@fugood/dns-sd-linux-x64-musl`](https://www.npmjs.com/package/@fugood/dns-sd-linux-x64-musl) |
+| Linux arm64 (musl) | [`@fugood/dns-sd-linux-arm64-musl`](https://www.npmjs.com/package/@fugood/dns-sd-linux-arm64-musl) |
+
+To bundle into a single executable, mark the platform packages you are *not* building for as
+external — a bundler tries to resolve all of them, and only the matching one is installed. The
+addon for the target platform is embedded, so the result needs no sidecar file and no
+configuration at runtime:
+
+```bash
+bun build --compile app.js --outfile app \
+  --external '@fugood/dns-sd-darwin-*' --external '@fugood/dns-sd-win32-*'
+```
+
+For layouts where that does not apply, `DNS_SD_NATIVE_LIBRARY_PATH` points at a `.node` file
+directly (resolved against the working directory).
 
 ## Usage
 
@@ -114,6 +129,25 @@ import DnsSd from '@fugood/dns-sd';
 console.log('Current Backend:', DnsSd.getBackendInfo());
 // Outputs: "bonjour", "native" (Avahi), or "mdns-sd"
 ```
+
+### Linux Notes
+
+The `native` backend needs `libavahi-client3`, which `avahi-daemon` does not pull in by itself:
+
+```bash
+sudo apt install libavahi-client3      # Debian/Ubuntu
+sudo dnf install avahi-libs            # Fedora/RHEL
+sudo apk add avahi-libs                # Alpine
+```
+
+Without it, or without a running `avahi-daemon`, `getBackendInfo()` reports `"mdns-sd"`. The
+two cases aren't distinguished; check `systemctl status avahi-daemon` to tell them apart.
+
+If `avahi-daemon` is running but `libavahi-client3` is missing, `advertise()` throws instead of
+falling back: publishing from the fallback alongside a running daemon puts the service on the
+network twice and degrades mDNS for every client on it. Install `libavahi-client3` or disable
+`avahi-daemon` to fix it, or set `DNS_SD_FORCE_FALLBACK_ADVERTISE=1` to publish anyway.
+Browsing is unaffected.
 
 ## API Reference
 
@@ -220,6 +254,10 @@ expose it.
 A service is emitted once its addresses have been collected. One whose host advertises no
 address is still emitted, after a short grace period, with an empty `addresses` array.
 
+`addresses` reports every interface an instance is reachable on, not just the first — a
+multi-homed host is announced once per interface and the addresses are collected into one
+entry. This is part of the API contract; callers may rely on it to probe every address.
+
 #### `BrowseOptions`
 ```typescript
 interface BrowseOptions {
@@ -250,6 +288,9 @@ message on every backend:
 *   a port outside 0-65535, or with a fractional part
 *   TXT entries that are empty-keyed, contain NUL bytes, or whose `key=value` pair exceeds
     the 255 byte limit from RFC 6763 section 6.1
+
+That 255 byte limit is per `key=value` pair, not per TXT record; the record as a whole has no
+enforced limit.
 
 Subtypes use the Bonjour spelling on both backends: `_http._tcp,_printer` advertises or
 browses the `_printer` subtype. The `mdns-sd` fallback supports one subtype per service.
@@ -284,7 +325,7 @@ What each backend does with a non-`local` domain:
 | Backend | Non-`local` domain |
 | --- | --- |
 | `bonjour` (macOS/Windows) | Accepted — queries/registers over unicast DNS |
-| `native` (Linux, Avahi compat) | Rejected by the daemon; surfaces as an `'error'` event or a throw |
+| `native` (Linux, Avahi) | Rejected by the daemon; surfaces as an `'error'` event or a throw |
 | `mdns-sd` (fallback) | Rejected up front with an explanatory error — mDNS serves `local.` only |
 
 ## Contributing
