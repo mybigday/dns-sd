@@ -1,0 +1,8 @@
+# musl targets link statically by default, and a static target cannot produce a
+# cdylib - the build fails outright with "does not support these crate types".
+# A Node addon has to be a dynamic library, so opt back out of crt-static.
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "target-feature=-crt-static"]
