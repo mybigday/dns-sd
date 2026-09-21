@@ -1,7 +1,7 @@
 {
   "name": "@fugood/dns-sd-linux-arm64-gnu",
   "description": "Prebuilt binary package for `@fugood/dns-sd` on `linux-arm64-gnu`.",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-beta.0",
   "os": [
     "linux"
   ],
