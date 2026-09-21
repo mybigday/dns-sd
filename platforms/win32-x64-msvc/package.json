@@ -1,7 +1,7 @@
 {
   "name": "@fugood/dns-sd-win32-x64-msvc",
   "description": "Prebuilt binary package for `@fugood/dns-sd` on `win32-x64-msvc`.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "os": [
     "win32"
   ],
