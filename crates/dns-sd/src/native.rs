@@ -8,6 +8,7 @@ use std::ffi::{CStr, CString};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::raw::c_void;
 use std::ptr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -100,6 +101,14 @@ mod sys {
 }
 
 
+/// How many names to try when resolving a conflict, per RFC 6762 section 9.
+const MAX_NAME_ATTEMPTS: u32 = 10;
+
+/// How long to wait for a service's addresses before giving up
+const ADDRESS_TIMEOUT_MS: u128 = 2000;
+/// How long the address set must stay unchanged before it counts as complete
+const ADDRESS_SETTLE: Duration = Duration::from_millis(300);
+
 /// Global library instance
 static LIBRARY: OnceCell<Result<DnsSdLibrary, String>> = OnceCell::new();
 
@@ -110,6 +119,7 @@ pub struct DnsSdLibrary {
     pub resolve: FnDNSServiceResolve,
     pub register: FnDNSServiceRegister,
     pub get_addr_info: Option<FnDNSServiceGetAddrInfo>, // Optional: missing on Linux Avahi
+    pub create_connection: Option<FnDNSServiceCreateConnection>,
     pub query_record: FnDNSServiceQueryRecord,
     pub ref_sock_fd: FnDNSServiceRefSockFD,
     pub process_result: FnDNSServiceProcessResult,
@@ -148,6 +158,13 @@ impl DnsSdLibrary {
                 .ok()
                 .map(|sym| *sym);
 
+            // Used to check that a daemon is actually listening, not just that
+            // the library linked.
+            let create_connection = lib
+                .get::<FnDNSServiceCreateConnection>(b"DNSServiceCreateConnection\0")
+                .ok()
+                .map(|sym| *sym);
+
             let query_record = *lib.get::<FnDNSServiceQueryRecord>(b"DNSServiceQueryRecord\0")
                 .map_err(|e| format!("DNSServiceQueryRecord: {}", e))?;
 
@@ -174,6 +191,7 @@ impl DnsSdLibrary {
                 resolve,
                 register,
                 get_addr_info,
+                create_connection,
                 query_record,
                 ref_sock_fd,
                 process_result,
@@ -197,8 +215,86 @@ impl DnsSdLibrary {
 }
 
 /// Check if native backend is available
+/// Cached daemon probe result. Cleared as soon as anything observes the daemon
+/// failing, so a caller recreating a handle after an error is never handed a
+/// stale "the daemon is fine" answer.
+static AVAILABILITY_CACHE: Mutex<Option<(std::time::Instant, bool)>> = Mutex::new(None);
+
+/// Forget the cached probe result.
+pub fn invalidate_availability() {
+    *AVAILABILITY_CACHE.lock().unwrap() = None;
+}
+
 pub fn is_available() -> bool {
-    DnsSdLibrary::get().is_ok()
+    // Probing costs a round trip to the daemon, and handles are often created
+    // in bursts, so the answer is reused briefly.
+    const CACHE_TTL: Duration = Duration::from_secs(5);
+
+    let mut cache = AVAILABILITY_CACHE.lock().unwrap();
+    if let Some((checked_at, available)) = *cache {
+        if checked_at.elapsed() < CACHE_TTL {
+            return available;
+        }
+    }
+
+    let available = probe_daemon();
+    *cache = Some((std::time::Instant::now(), available));
+    available
+}
+
+/// Check that a DNS-SD daemon is actually reachable.
+///
+/// Linking is not the same as being usable: Avahi's compat library loads
+/// happily while avahi-daemon is not running, and every call then fails. This
+/// is what lets the mdns-sd fallback take over when the system service is
+/// unavailable, rather than only when the library is missing.
+fn probe_daemon() -> bool {
+    let lib = match DnsSdLibrary::get() {
+        Ok(lib) => lib,
+        Err(_) => return false,
+    };
+
+    // Bonjour answers this without touching the network. Avahi's compat layer
+    // does not implement it (kDNSServiceErr_Unsupported), so fall through to a
+    // browse, which it does implement.
+    if let Some(create_connection) = lib.create_connection {
+        let mut sd_ref: DNSServiceRef = ptr::null_mut();
+        let err = unsafe { create_connection(&mut sd_ref) };
+        if err == K_DNS_SERVICE_ERR_NO_ERROR {
+            if !sd_ref.is_null() {
+                unsafe { (lib.ref_deallocate)(sd_ref) };
+            }
+            return true;
+        }
+        if err != K_DNS_SERVICE_ERR_UNSUPPORTED {
+            return false;
+        }
+    }
+
+    // Starting a browse fails immediately when no daemon is listening. It is
+    // torn down before it can produce any traffic of consequence.
+    let probe_type = match CString::new("_dns-sd-probe._udp") {
+        Ok(t) => t,
+        Err(_) => return false,
+    };
+    let mut sd_ref: DNSServiceRef = ptr::null_mut();
+    let err = unsafe {
+        (lib.browse)(
+            &mut sd_ref,
+            0,
+            0,
+            probe_type.as_ptr(),
+            ptr::null(),
+            None,
+            ptr::null_mut(),
+        )
+    };
+    if err == K_DNS_SERVICE_ERR_NO_ERROR && !sd_ref.is_null() {
+        unsafe { (lib.ref_deallocate)(sd_ref) };
+        true
+    } else {
+        false
+    }
 }
 
 /// Service info from browse/resolve
@@ -214,12 +310,37 @@ pub struct ServiceInfo {
     pub ttl: u32,
 }
 
+impl ServiceInfo {
+    /// Carrier for an error message on the browse callback channel.
+    ///
+    /// `lib.rs` hands the JS side `name` as a plain string when the event is
+    /// `"error"`, so browse failures surface as an `'error'` event instead of
+    /// being swallowed.
+    pub fn error(message: String) -> Self {
+        ServiceInfo {
+            name: message,
+            service_type: String::new(),
+            domain: String::new(),
+            host_name: String::new(),
+            addresses: vec![],
+            port: 0,
+            txt: HashMap::new(),
+            ttl: 0,
+        }
+    }
+}
+
 /// Shared callback type for thread-safe access
 type SharedCallback = Arc<dyn Fn(&str, ServiceInfo) + Send + Sync + 'static>;
 
 /// Context passed to browse callback
 struct BrowseContext {
     callback: SharedCallback,
+    /// Set once the daemon reports a failure. dns_sd.h states that an error
+    /// delivered to a callback means the operation has failed for good, so the
+    /// poll thread stops instead of idling on a handle that can never produce
+    /// another event.
+    dead: Arc<AtomicBool>,
 }
 
 /// Browse callback - spawns resolve thread for each service
@@ -234,11 +355,15 @@ unsafe extern "C" fn browse_callback(
     context: *mut c_void,
 ) {
     unsafe {
+        let ctx = &*(context as *const BrowseContext);
+
         if error_code != K_DNS_SERVICE_ERR_NO_ERROR {
+            (ctx.callback)("error", ServiceInfo::error(error_message(error_code)));
+            ctx.dead.store(true, Ordering::SeqCst);
+            invalidate_availability();
             return;
         }
 
-        let ctx = &*(context as *const BrowseContext);
         
         let name = CStr::from_ptr(service_name).to_string_lossy().into_owned();
         let service_type = CStr::from_ptr(reg_type).to_string_lossy().into_owned();
@@ -273,6 +398,9 @@ unsafe extern "C" fn browse_callback(
 /// Shared state for resolution process
 struct ResolveState {
     info: ServiceInfo,
+    /// When the last field/address update landed - used to stop polling early
+    /// once a service has settled instead of always burning the full timeout.
+    last_update: std::time::Instant,
 }
 
 /// Fully resolve a service - gets hostname, port, TXT, and IP addresses
@@ -303,6 +431,7 @@ fn resolve_service_full(
 
     // Shared state
     let state = Arc::new(Mutex::new(ResolveState {
+        last_update: std::time::Instant::now(),
         info: ServiceInfo {
             name: name.to_string(),
             service_type: service_type.to_string(),
@@ -343,6 +472,7 @@ fn resolve_service_full(
             state.info.port = u16::from_be(port);
             state.info.txt = parse_txt_record(txt_record as *const u8, txt_len as usize);
         }
+        state.last_update = std::time::Instant::now();
 
         // Emit partial result
         callback("serviceFound", state.info.clone());
@@ -370,7 +500,7 @@ fn resolve_service_full(
     }
 
     // Poll until we get hostname (short timeout)
-    poll_service_loop(lib, resolve_ref, 3000, || {
+    poll_service_refs(lib, &[resolve_ref], 3000, || {
         let s = state_resolve.lock().unwrap();
         !s.info.host_name.is_empty()
     });
@@ -437,6 +567,7 @@ fn resolve_service_full(
 
                 if !ip_str.is_empty() && !state.info.addresses.contains(&ip_str) {
                     state.info.addresses.push(ip_str);
+                    state.last_update = std::time::Instant::now();
                     // Emit update for each new address
                     callback("serviceFound", state.info.clone());
                 }
@@ -460,9 +591,12 @@ fn resolve_service_full(
         };
 
         if err == K_DNS_SERVICE_ERR_NO_ERROR && !addr_ref.is_null() {
-            let timeout = 2000;
-            // Simply poll for a while to collect addresses
-            poll_service_loop(lib, addr_ref, timeout, || false);
+            let state_addr = state.clone();
+            // Collect addresses until they stop arriving, capped at the timeout
+            poll_service_refs(lib, &[addr_ref], ADDRESS_TIMEOUT_MS, || {
+                let s = state_addr.lock().unwrap();
+                !s.info.addresses.is_empty() && s.last_update.elapsed() >= ADDRESS_SETTLE
+            });
 
             unsafe {
                 (lib.ref_deallocate)(addr_ref);
@@ -516,6 +650,7 @@ fn resolve_service_full(
 
             if !ip_str.is_empty() && !state.info.addresses.contains(&ip_str) {
                 state.info.addresses.push(ip_str);
+                state.last_update = std::time::Instant::now();
                 callback("serviceFound", state.info.clone());
             }
         }
@@ -558,20 +693,12 @@ fn resolve_service_full(
         if (err_a == K_DNS_SERVICE_ERR_NO_ERROR && !query_ref.is_null()) || 
            (err_aaaa == K_DNS_SERVICE_ERR_NO_ERROR && !query_ref6.is_null()) {
              
-            let timeout = 2000;
-            let start = std::time::Instant::now();
-            
-            // Poll both refs
-            while start.elapsed().as_millis() < timeout {
-                 if !query_ref.is_null() {
-                      unsafe { (lib.process_result)(query_ref); }
-                 }
-                 if !query_ref6.is_null() {
-                      unsafe { (lib.process_result)(query_ref6); }
-                 }
-                 // Small sleep to prevent busy loop
-                 thread::sleep(Duration::from_millis(50));
-            }
+            let state_query = state.clone();
+            // Poll both refs together; stop once the address set has settled
+            poll_service_refs(lib, &[query_ref, query_ref6], ADDRESS_TIMEOUT_MS, || {
+                let s = state_query.lock().unwrap();
+                !s.info.addresses.is_empty() && s.last_update.elapsed() >= ADDRESS_SETTLE
+            });
 
             unsafe {
                 if !query_ref.is_null() { (lib.ref_deallocate)(query_ref); }
@@ -581,33 +708,66 @@ fn resolve_service_full(
     }
 }
 
-/// Helper to poll service ref with timeout and early exit predicate
-fn poll_service_loop<F>(lib: &DnsSdLibrary, sd_ref: DNSServiceRef, timeout_ms: u128, mut should_exit: F) 
-where F: FnMut() -> bool {
+/// Poll one or more service refs until the predicate passes or the timeout elapses.
+///
+/// Every ref is checked for readability before `DNSServiceProcessResult` is called:
+/// that call blocks until a record arrives, so processing an idle ref would wedge
+/// the loop, leak the thread and leave the refs deallocated forever.
+fn poll_service_refs<F>(
+    lib: &DnsSdLibrary,
+    refs: &[DNSServiceRef],
+    timeout_ms: u128,
+    mut should_exit: F,
+) where
+    F: FnMut() -> bool,
+{
     let start = std::time::Instant::now();
-    
+    let mut pfds: Vec<sys::pollfd> = Vec::with_capacity(refs.len());
+    let mut active: Vec<DNSServiceRef> = Vec::with_capacity(refs.len());
+
     while start.elapsed().as_millis() < timeout_ms {
         if should_exit() {
             break;
         }
 
-        unsafe {
-            let fd = (lib.ref_sock_fd)(sd_ref);
-            if fd < 0 { break; }
+        pfds.clear();
+        active.clear();
 
-            let mut pfd = sys::pollfd {
+        for &sd_ref in refs {
+            if sd_ref.is_null() {
+                continue;
+            }
+            let fd = unsafe { (lib.ref_sock_fd)(sd_ref) };
+            if fd < 0 {
+                continue;
+            }
+            pfds.push(sys::pollfd {
                 fd: fd as _,
                 events: sys::POLLIN,
                 revents: 0,
-            };
+            });
+            active.push(sd_ref);
+        }
 
-            let remaining = timeout_ms.saturating_sub(start.elapsed().as_millis()).max(1) as i32;
-            let poll_timeout = remaining.min(100); // Poll in 100ms chunks to check predicate
+        if pfds.is_empty() {
+            break;
+        }
 
-            let ready = sys::poll(&mut pfd, 1, poll_timeout);
+        let remaining = timeout_ms.saturating_sub(start.elapsed().as_millis()).max(1) as i32;
+        let poll_timeout = remaining.min(100); // Poll in chunks so the predicate is re-checked
 
-            if ready > 0 {
-                (lib.process_result)(sd_ref);
+        let ready = unsafe { sys::poll(pfds.as_mut_ptr(), pfds.len() as _, poll_timeout) };
+        if ready <= 0 {
+            continue;
+        }
+
+        for (i, pfd) in pfds.iter().enumerate() {
+            // Any reported event (including POLLERR/POLLHUP) is handed to the library,
+            // which reports the failure through its own error code.
+            if pfd.revents != 0 {
+                unsafe {
+                    (lib.process_result)(active[i]);
+                }
             }
         }
     }
@@ -657,20 +817,28 @@ unsafe impl Send for NativeBrowser {}
 
 impl NativeBrowser {
     /// Start browsing for services
-    pub fn new<F>(service_type: &str, callback: F) -> Result<Self, String>
+    pub fn new<F>(service_type: &str, domain: Option<&str>, callback: F) -> Result<Self, String>
     where
         F: Fn(&str, ServiceInfo) + Send + Sync + 'static,
     {
         let lib = DnsSdLibrary::get()?;
-        
-        let stop_flag = Arc::new(Mutex::new(false));
-        
-        let ctx = Box::new(BrowseContext {
-            callback: Arc::new(callback),
-        });
-        let ctx_ptr = Box::into_raw(ctx);
 
         let reg_type = CString::new(service_type).map_err(|e| e.to_string())?;
+        // NULL means "the daemon's default domains"
+        let domain_c = match domain {
+            Some(d) if !d.is_empty() => Some(CString::new(d).map_err(|e| e.to_string())?),
+            _ => None,
+        };
+        let domain_ptr = domain_c.as_ref().map_or(ptr::null(), |d| d.as_ptr());
+
+        let stop_flag = Arc::new(Mutex::new(false));
+
+        let dead = Arc::new(AtomicBool::new(false));
+        let ctx = Box::new(BrowseContext {
+            callback: Arc::new(callback),
+            dead: dead.clone(),
+        });
+        let ctx_ptr = Box::into_raw(ctx);
         
         let mut sd_ref: DNSServiceRef = ptr::null_mut();
         
@@ -680,22 +848,30 @@ impl NativeBrowser {
                 0,
                 0,
                 reg_type.as_ptr(),
-                ptr::null(),
+                domain_ptr,
                 Some(browse_callback),
                 ctx_ptr as *mut c_void,
             )
         };
 
-        check_error(err)?;
+        if let Err(e) = check_error(err) {
+            unsafe { drop(Box::from_raw(ctx_ptr)) };
+            return Err(e);
+        }
 
         if sd_ref.is_null() {
+            unsafe { drop(Box::from_raw(ctx_ptr)) };
             return Err("DNSServiceBrowse returned null".into());
         }
 
         // Start event loop thread
         let sd_ref_copy = sd_ref as usize;
         let stop_flag_clone = stop_flag.clone();
-        
+        // SAFETY: ctx_ptr stays alive until stop() reclaims it, and stop() joins
+        // this thread first.
+        let thread_callback = unsafe { (*ctx_ptr).callback.clone() };
+        let dead_clone = dead.clone();
+
         let thread = thread::spawn(move || {
             let sd_ref = sd_ref_copy as DNSServiceRef;
             let lib = match DnsSdLibrary::get() {
@@ -704,13 +880,21 @@ impl NativeBrowser {
             };
 
             loop {
-                if *stop_flag_clone.lock().unwrap() {
+                if *stop_flag_clone.lock().unwrap() || dead_clone.load(Ordering::SeqCst) {
                     break;
                 }
 
                 unsafe {
                     let fd = (lib.ref_sock_fd)(sd_ref);
                     if fd < 0 {
+                        // The daemon went away: the browse is dead and no further
+                        // events will ever arrive, so say so instead of going quiet.
+                        thread_callback(
+                            "error",
+                            ServiceInfo::error(
+                                "browse connection to the DNS-SD daemon was lost".to_string(),
+                            ),
+                        );
                         break;
                     }
 
@@ -725,6 +909,13 @@ impl NativeBrowser {
                     if ready > 0 {
                         let err = (lib.process_result)(sd_ref);
                         if err != K_DNS_SERVICE_ERR_NO_ERROR {
+                            thread_callback(
+                                "error",
+                                ServiceInfo::error(format!(
+                                    "browse stopped: {}",
+                                    error_message(err)
+                                )),
+                            );
                             break;
                         }
                     }
@@ -780,7 +971,9 @@ impl Drop for NativeBrowser {
 
 /// Context for register callback
 struct RegisterContext {
-    callback: Box<dyn Fn(&str, &str) + Send + 'static>,
+    callback: Arc<dyn Fn(&str, &str) + Send + Sync + 'static>,
+    /// See `BrowseContext::dead`.
+    dead: Arc<AtomicBool>,
 }
 
 /// Register callback
@@ -800,7 +993,9 @@ unsafe extern "C" fn register_callback(
             let name_str = CStr::from_ptr(name).to_string_lossy().into_owned();
             (ctx.callback)("registered", &name_str);
         } else {
-            (ctx.callback)("error", &format!("DNS-SD error: {}", error_code));
+            (ctx.callback)("error", &error_message(error_code));
+            ctx.dead.store(true, Ordering::SeqCst);
+            invalidate_availability();
         }
     }
 }
@@ -821,41 +1016,77 @@ impl NativeAdvertisement {
     pub fn new<F>(
         name: &str,
         service_type: &str,
+        domain: Option<&str>,
+        host_name: Option<&str>,
         port: u16,
         txt: Option<&HashMap<String, String>>,
         callback: F,
     ) -> Result<Self, String>
     where
-        F: Fn(&str, &str) + Send + 'static,
+        F: Fn(&str, &str) + Send + Sync + 'static,
     {
         let lib = DnsSdLibrary::get()?;
-        
+
+        // Everything fallible runs before the context is leaked into C, so an
+        // early return can never strand the allocation.
+        let name_c = CString::new(name).map_err(|e| e.to_string())?;
+        let reg_type = CString::new(service_type).map_err(|e| e.to_string())?;
+        let host_c = match host_name {
+            Some(h) if !h.is_empty() => Some(CString::new(h).map_err(|e| e.to_string())?),
+            _ => None,
+        };
+        let host_ptr = host_c.as_ref().map_or(ptr::null(), |h| h.as_ptr());
+        let domain_c = match domain {
+            Some(d) if !d.is_empty() => Some(CString::new(d).map_err(|e| e.to_string())?),
+            _ => None,
+        };
+        let domain_ptr = domain_c.as_ref().map_or(ptr::null(), |d| d.as_ptr());
+
+        let mut txt_entries: Vec<(CString, &str)> = Vec::new();
+        if let Some(txt_map) = txt {
+            for (k, v) in txt_map {
+                // RFC 6763 section 6.1: a whole "key=value" entry is length
+                // prefixed by a single byte, so it cannot exceed 255 bytes.
+                if k.len() + 1 + v.len() > 255 {
+                    return Err(format!(
+                        "TXT record entry '{}' is {} bytes, over the 255 byte DNS-SD limit",
+                        k,
+                        k.len() + 1 + v.len()
+                    ));
+                }
+                let key_c = CString::new(k.as_str())
+                    .map_err(|_| format!("TXT record key '{}' contains a NUL byte", k.escape_debug()))?;
+                if v.as_bytes().contains(&0) {
+                    return Err(format!("TXT record value for '{}' contains a NUL byte", k));
+                }
+                txt_entries.push((key_c, v.as_str()));
+            }
+        }
+
         let stop_flag = Arc::new(Mutex::new(false));
-        
+
+        let dead = Arc::new(AtomicBool::new(false));
         let ctx = Box::new(RegisterContext {
-            callback: Box::new(callback),
+            callback: Arc::new(callback),
+            dead: dead.clone(),
         });
         let ctx_ptr = Box::into_raw(ctx);
 
-        let name_c = CString::new(name).map_err(|e| e.to_string())?;
-        let reg_type = CString::new(service_type).map_err(|e| e.to_string())?;
-        
         // Build TXT record
-        let mut txt_ref: TXTRecordRef = [0u8; 16];
-        let (txt_len, txt_ptr) = if let Some(txt_map) = txt {
+        let mut txt_ref = TXTRecordRef::new();
+        let (txt_len, txt_ptr) = if txt.is_some() {
             unsafe {
                 (lib.txt_record_create)(&mut txt_ref, 0, ptr::null_mut());
-                
-                for (k, v) in txt_map {
-                    let key_c = CString::new(k.as_str()).unwrap();
+
+                for (key_c, value) in &txt_entries {
                     let _ = (lib.txt_record_set_value)(
                         &mut txt_ref,
                         key_c.as_ptr(),
-                        v.len() as u8,
-                        v.as_ptr() as *const c_void,
+                        value.len() as u8,
+                        value.as_ptr() as *const c_void,
                     );
                 }
-                
+
                 let len = (lib.txt_record_get_length)(&txt_ref);
                 let ptr = (lib.txt_record_get_bytes_ptr)(&txt_ref);
                 (len, ptr)
@@ -864,24 +1095,58 @@ impl NativeAdvertisement {
             (0, ptr::null())
         };
 
+        // RFC 6762 section 9 conflict resolution: Bonjour and the mdns-sd
+        // responder rename a clashing service themselves ("Name (2)"), while
+        // Avahi's compat layer just refuses with kDNSServiceErr_NameConflict.
+        // Renaming here keeps every backend behaving the same.
         let mut sd_ref: DNSServiceRef = ptr::null_mut();
-        
-        let err = unsafe {
-            (lib.register)(
-                &mut sd_ref,
-                0,
-                0,
-                name_c.as_ptr(),
-                reg_type.as_ptr(),
-                ptr::null(),
-                ptr::null(),
-                port.to_be(),
-                txt_len,
-                txt_ptr,
-                Some(register_callback),
-                ctx_ptr as *mut c_void,
-            )
-        };
+        let mut err = K_DNS_SERVICE_ERR_NO_ERROR;
+
+        for attempt in 1..=MAX_NAME_ATTEMPTS {
+            let candidate_c = if attempt == 1 {
+                name_c.clone()
+            } else {
+                let candidate = format!("{} ({})", name, attempt);
+                // A renamed instance is still a single DNS label
+                if candidate.len() > crate::MAX_LABEL_BYTES {
+                    break;
+                }
+                match CString::new(candidate) {
+                    Ok(c) => c,
+                    Err(_) => break,
+                }
+            };
+
+            sd_ref = ptr::null_mut();
+            err = unsafe {
+                (lib.register)(
+                    &mut sd_ref,
+                    0,
+                    0,
+                    candidate_c.as_ptr(),
+                    reg_type.as_ptr(),
+                    domain_ptr,
+                    host_ptr,
+                    port.to_be(),
+                    txt_len,
+                    txt_ptr,
+                    Some(register_callback),
+                    ctx_ptr as *mut c_void,
+                )
+            };
+
+            if err != K_DNS_SERVICE_ERR_NAME_CONFLICT {
+                break;
+            }
+
+            // dns_sd.h leaves *sdRef untouched on failure, but Avahi's compat
+            // layer is a separate implementation - release anything it did hand
+            // back before trying the next name.
+            if !sd_ref.is_null() {
+                unsafe { (lib.ref_deallocate)(sd_ref) };
+                sd_ref = ptr::null_mut();
+            }
+        }
 
         if txt.is_some() {
             unsafe {
@@ -889,16 +1154,24 @@ impl NativeAdvertisement {
             }
         }
 
-        check_error(err)?;
+        if let Err(e) = check_error(err) {
+            unsafe { drop(Box::from_raw(ctx_ptr)) };
+            return Err(e);
+        }
 
         if sd_ref.is_null() {
+            unsafe { drop(Box::from_raw(ctx_ptr)) };
             return Err("DNSServiceRegister returned null".into());
         }
 
         // Start event loop thread
         let sd_ref_copy = sd_ref as usize;
         let stop_flag_clone = stop_flag.clone();
-        
+        // SAFETY: ctx_ptr stays alive until stop() reclaims it, and stop() joins
+        // this thread first.
+        let thread_callback = unsafe { (*ctx_ptr).callback.clone() };
+        let dead_clone = dead.clone();
+
         let thread = thread::spawn(move || {
             let sd_ref = sd_ref_copy as DNSServiceRef;
             let lib = match DnsSdLibrary::get() {
@@ -907,13 +1180,19 @@ impl NativeAdvertisement {
             };
 
             loop {
-                if *stop_flag_clone.lock().unwrap() {
+                if *stop_flag_clone.lock().unwrap() || dead_clone.load(Ordering::SeqCst) {
                     break;
                 }
 
                 unsafe {
                     let fd = (lib.ref_sock_fd)(sd_ref);
                     if fd < 0 {
+                        // The daemon went away, so the service is no longer
+                        // published even though this handle still looks alive.
+                        thread_callback(
+                            "error",
+                            "advertisement lost its connection to the DNS-SD daemon",
+                        );
                         break;
                     }
 
@@ -928,6 +1207,10 @@ impl NativeAdvertisement {
                     if ready > 0 {
                         let err = (lib.process_result)(sd_ref);
                         if err != K_DNS_SERVICE_ERR_NO_ERROR {
+                            thread_callback(
+                                "error",
+                                &format!("advertisement stopped: {}", error_message(err)),
+                            );
                             break;
                         }
                     }

@@ -52,7 +52,19 @@ pub const K_DNS_SERVICE_TYPE_A: u16 = 1;
 pub const K_DNS_SERVICE_TYPE_AAAA: u16 = 28;
 
 /// TXT record reference
-pub type TXTRecordRef = [u8; 16]; // Opaque, 16 bytes should be enough
+///
+/// `dns_sd.h` declares this as a union of a 16 byte buffer and a `char *`, so the
+/// C type carries pointer alignment. A bare `[u8; 16]` would only be 1-aligned and
+/// the library writes pointer-sized fields into it.
+#[repr(C, align(8))]
+#[derive(Clone, Copy)]
+pub struct TXTRecordRef(pub [u8; 16]);
+
+impl TXTRecordRef {
+    pub const fn new() -> Self {
+        Self([0u8; 16])
+    }
+}
 
 /// Browse callback type
 pub type DNSServiceBrowseReply = Option<
@@ -186,6 +198,9 @@ pub type FnDNSServiceQueryRecord = unsafe extern "C" fn(
     context: *mut c_void,
 ) -> DNSServiceErrorType;
 
+pub type FnDNSServiceCreateConnection =
+    unsafe extern "C" fn(sd_ref: *mut DNSServiceRef) -> DNSServiceErrorType;
+
 pub type FnDNSServiceRefSockFD = unsafe extern "C" fn(sd_ref: DNSServiceRef) -> c_int;
 
 pub type FnDNSServiceProcessResult = unsafe extern "C" fn(sd_ref: DNSServiceRef) -> DNSServiceErrorType;
@@ -232,11 +247,37 @@ pub fn get_library_path() -> &'static str {
     }
 }
 
+/// Human readable text for a DNS-SD error code.
+///
+/// The raw codes are large negative numbers that mean nothing to a caller, so
+/// every message that reaches JavaScript carries the name as well.
+pub fn error_message(err: DNSServiceErrorType) -> String {
+    let name = match err {
+        K_DNS_SERVICE_ERR_UNKNOWN => "unknown error",
+        K_DNS_SERVICE_ERR_NO_SUCH_NAME => "no such name",
+        K_DNS_SERVICE_ERR_NO_MEMORY => "out of memory",
+        K_DNS_SERVICE_ERR_BAD_PARAM => "bad parameter",
+        K_DNS_SERVICE_ERR_BAD_REFERENCE => "bad reference",
+        K_DNS_SERVICE_ERR_BAD_STATE => "bad state",
+        K_DNS_SERVICE_ERR_BAD_FLAGS => "bad flags",
+        K_DNS_SERVICE_ERR_UNSUPPORTED => "unsupported by this DNS-SD daemon",
+        K_DNS_SERVICE_ERR_NOT_INITIALIZED => "not initialized",
+        K_DNS_SERVICE_ERR_ALREADY_REGISTERED => "already registered",
+        K_DNS_SERVICE_ERR_NAME_CONFLICT => "name conflict",
+        K_DNS_SERVICE_ERR_INVALID => "invalid value",
+        K_DNS_SERVICE_ERR_FIREWALL => "blocked by firewall",
+        K_DNS_SERVICE_ERR_INCOMPATIBLE => "incompatible daemon version",
+        K_DNS_SERVICE_ERR_TIMEOUT => "timed out",
+        _ => "unrecognized error",
+    };
+    format!("DNS-SD error: {} ({})", name, err)
+}
+
 /// Convert DNSServiceErrorType to Result
 pub fn check_error(err: DNSServiceErrorType) -> Result<(), String> {
     if err == K_DNS_SERVICE_ERR_NO_ERROR {
         Ok(())
     } else {
-        Err(format!("DNS-SD error: {}", err))
+        Err(error_message(err))
     }
 }
