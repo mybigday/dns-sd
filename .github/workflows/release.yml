@@ -134,6 +134,19 @@ jobs:
         shell: bash
         run: |
           npm --version
+          version=$(node -p "require('./package.json').version")
+          # npm refuses to publish a prerelease without an explicit dist-tag, so
+          # that `latest` can never end up pointing at a preview build. Name the
+          # tag after the prerelease identifier: 0.1.0-beta.1 publishes as beta.
+          tag=latest
+          if [[ "$version" == *-* ]]; then
+            pre="${version#*-}"
+            tag="${pre%%.*}"
+            if [[ ! "$tag" =~ ^[a-z][a-z0-9-]*$ ]]; then
+              tag=next
+            fi
+          fi
+          echo "publishing $version with dist-tag $tag"
           for p in ./dist/*.tgz ; do
-            npm publish --access public $p
+            npm publish --access public --tag "$tag" $p
           done
