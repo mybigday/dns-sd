@@ -103,26 +103,37 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Required for npm trusted publishing. Job level permissions replace the
+      # workflow level block outright, so id-token has to be repeated here.
+      id-token: write
     steps:
       - name: Checkout Code
         uses: actions/checkout@v3
         with:
           ref: ${{ needs.setup.outputs.ref }}
-      - name: Setup Neon Environment
-        uses: ./.github/actions/setup
+      # Publishing does not need the project's dependencies, but it does need a
+      # newer toolchain than the build: trusted publishing requires npm 11.5.1
+      # and Node 22.14.0 at minimum.
+      - name: Install Node
+        uses: actions/setup-node@v4
         with:
-          use-rust: false
+          node-version: '22.x'
+          registry-url: ${{ env.NPM_REGISTRY }}
+      - name: Update npm
+        shell: bash
+        run: npm install -g npm@latest
       - name: Fetch
         uses: robinraju/release-downloader@c39a3b234af58f0cf85888573d361fb6fa281534 # v1.10
         with:
           tag: ${{ needs.setup.outputs.tag }}
           fileName: "*.tgz"
           out-file-path: ./dist
+      # No NODE_AUTH_TOKEN: authentication is the OIDC exchange, and npm
+      # attaches provenance automatically when it publishes this way.
       - name: Publish
         shell: bash
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
+          npm --version
           for p in ./dist/*.tgz ; do
             npm publish --access public $p
           done
