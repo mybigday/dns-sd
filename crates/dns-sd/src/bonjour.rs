@@ -118,7 +118,7 @@ pub struct DnsSdLibrary {
     pub browse: FnDNSServiceBrowse,
     pub resolve: FnDNSServiceResolve,
     pub register: FnDNSServiceRegister,
-    pub get_addr_info: Option<FnDNSServiceGetAddrInfo>, // Optional: missing on Linux Avahi
+    pub get_addr_info: Option<FnDNSServiceGetAddrInfo>,
     pub create_connection: Option<FnDNSServiceCreateConnection>,
     pub query_record: FnDNSServiceQueryRecord,
     pub ref_sock_fd: FnDNSServiceRefSockFD,
@@ -225,6 +225,13 @@ pub fn invalidate_availability() {
     *AVAILABILITY_CACHE.lock().unwrap() = None;
 }
 
+/// Counterpart to avahi.rs's check of the same name; never blocks here.
+/// macOS/Windows ship the DNS-SD library and the responder together, so
+/// failing to load one means the other isn't there to collide with.
+pub fn fallback_publish_conflict() -> Option<String> {
+    None
+}
+
 pub fn is_available() -> bool {
     // Probing costs a round trip to the daemon, and handles are often created
     // in bursts, so the answer is reused briefly.
@@ -254,9 +261,7 @@ fn probe_daemon() -> bool {
         Err(_) => return false,
     };
 
-    // Bonjour answers this without touching the network. Avahi's compat layer
-    // does not implement it (kDNSServiceErr_Unsupported), so fall through to a
-    // browse, which it does implement.
+    // Bonjour answers this without touching the network.
     if let Some(create_connection) = lib.create_connection {
         let mut sd_ref: DNSServiceRef = ptr::null_mut();
         let err = unsafe { create_connection(&mut sd_ref) };

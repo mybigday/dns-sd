@@ -3,6 +3,8 @@
 //! Tries native backend (Avahi/Bonjour) first, falls back to mdns-sd if unavailable.
 
 mod ffi;
+#[cfg_attr(target_os = "linux", path = "avahi.rs")]
+#[cfg_attr(not(target_os = "linux"), path = "bonjour.rs")]
 mod native;
 mod fallback;
 
@@ -530,6 +532,11 @@ fn advertise_service<'cx>(
                      DNS Update on that domain's server",
                     domain.unwrap_or_default()
                 ));
+            }
+            // Checked here rather than at backend selection: only publishing
+            // is harmful, so browsing keeps working in that state.
+            if let Some(conflict) = native::fallback_publish_conflict() {
+                return cx.throw_error(conflict);
             }
             fallback::FallbackAdvertisement::new(
                 &name,
